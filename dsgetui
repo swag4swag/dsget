@@ -1,0 +1,371 @@
+#!/usr/bin/python
+from gi.repository import Gtk, Gio, GObject, GLib
+import os
+from os.path import expanduser
+import requests
+import time
+import sys
+import re
+import imghdr
+import unicodedata
+import threading
+import time
+from bs4 import BeautifulSoup
+
+#Some of this shit was taken from an anon's code for exhentai downloading. 
+def IsOneShot(gallery):
+        '''Decides what to do depending on what the gallery is'''
+        global ovdirectory
+
+        if gallery.findAll('dl', { 'class' : 'chapter-list'}) == []:
+            return True    #Is there a way to do this in one line? I don't know.
+        else:
+            pretitle = gallery.find('title').text
+            title = pretitle[17:]
+            directory = title + "/"
+            return False
+
+def GetGallery(gallery_url):
+    '''Returns gallery page to be loaded'''
+    fail = 0
+
+    while fail < 3:
+        try:
+            print(gallery_url)
+            r = s.get(gallery_url)
+            break
+        except requests.exceptions.RequestException:
+            fail += 1
+            print("Failed to load page (attempt %d / 3). Retrying in 10s..." % fail)
+            time.sleep(10)
+
+    if fail == 3:
+        sys.exit("Fatal error: Exceeded max retry attempts for page load")
+
+    return r
+
+def GetGalleryURLs(o_gallery):
+    '''Returns gallery URLs'''
+    imgurls=o_gallery.findAll('a', { 'class' : 'name' })
+    urllist=[]
+
+    for i in imgurls:
+        urllist.append('http://dynasty-scans.com' + i.get('href'))
+
+    return urllist
+
+class MyWindow(Gtk.Window):
+    #init
+    def __init__(self):
+        Gtk.Window.__init__(self, title="dsget")
+
+
+        grid = Gtk.Grid(expand=True, row_spacing=10, column_spacing=10)
+        self.add(grid)
+
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        pmenu = Gtk.Menu()
+        for menulabel in ['Preferences', 'About']:
+            menuitem = Gtk.MenuItem(label=menulabel)
+            menuitem.connect("activate", self.on_menuitem_clicked, menulabel)
+            menuitem.show()
+            pmenu.append(menuitem)
+
+        sbutton = Gtk.MenuButton(popup=pmenu)
+        box.add(sbutton)
+
+        gobutton = Gtk.Button()
+        goicon = Gio.ThemedIcon(name="media-playback-start-symbolic")
+        goimage = Gtk.Image.new_from_gicon(goicon, Gtk.IconSize.BUTTON)
+        gobutton.add(goimage)
+        gobutton.connect("clicked", self.on_go_clicked)
+
+        psbutton = Gtk.Button()
+        psicon = Gio.ThemedIcon(name="media-playback-pause-symbolic")
+        psimage = Gtk.Image.new_from_gicon(psicon, Gtk.IconSize.BUTTON)
+        psbutton.add(psimage)
+        psbutton.connect("clicked", self.on_pause_clicked)
+
+        hb = Gtk.HeaderBar()
+        hb.props.show_close_button = True
+        hb.props.title = "dsget"
+        self.set_titlebar(hb)
+
+        hb.pack_end(box)
+        hb.pack_start(gobutton)
+        hb.pack_start(psbutton)
+
+
+        self.liststore = Gtk.ListStore(str, str, int)
+
+        treeview = Gtk.TreeView(model=self.liststore)
+        treeview.set_hexpand(True)
+        treeview.set_vexpand(True)
+
+        renderer_url = Gtk.CellRendererText()
+        renderer_url.set_property("editable", True)
+
+        column_url = Gtk.TreeViewColumn("URL", renderer_url, text=0)
+        treeview.append_column(column_url)
+        renderer_url.connect("edited", self.text_edited)
+
+        renderer_dir = Gtk.CellRendererText()
+        renderer_dir.set_property("editable", True)
+
+        column_dir = Gtk.TreeViewColumn("Folder", renderer_dir, text=1)
+        treeview.append_column(column_dir)
+        renderer_dir.connect("edited", self.text_edited)
+
+        renderer_progress = Gtk.CellRendererProgress()
+        column_progress = Gtk.TreeViewColumn("Progress", renderer_progress, value=2)
+        treeview.append_column(column_progress)
+
+        self.entryurl = Gtk.Entry()
+        self.entryurl.set_placeholder_text("Enter URL here.")
+        self.entryurl.set_width_chars(40)
+
+        self.entrydir = Gtk.Entry()
+        self.entrydir.set_placeholder_text("Enter folder here (optional).")
+
+        startbutton = Gtk.Button()
+        sbicon = Gio.ThemedIcon(name="list-add-symbolic")
+        sbimage = Gtk.Image.new_from_gicon(sbicon, Gtk.IconSize.BUTTON)
+        startbutton.add(sbimage)
+        startbutton.connect("clicked", self.on_add_clicked)
+
+        folderbutton = Gtk.Button()
+        fbicon = Gio.ThemedIcon(name="folder-symbolic")
+        fbimage = Gtk.Image.new_from_gicon(fbicon, Gtk.IconSize.BUTTON)
+        folderbutton.add(fbimage)
+        folderbutton.connect("clicked", self.on_folder_clicked)
+
+        grid.attach(self.entryurl, 0, 0, 2, 1)
+        grid.attach(self.entrydir, 0, 1, 2, 1)
+        grid.attach(startbutton, 2, 0, 1, 1)
+        grid.attach(folderbutton, 2, 1, 1, 1)
+        grid.attach(treeview, 0, 2, 3, 2)
+
+
+
+
+    def on_add_clicked(self, widget):
+        tmpurl = self.entryurl.get_text()
+        tmpdir = self.entrydir.get_text()
+        trailslash = re.compile('\/+$')
+        if tmpdir == "":
+            tmpdir = expanduser("~") + "/Downloads/"
+        elif trailslash.match(tmpdir):
+            tmpdir = tmpdir + "/"
+        dsgetcore = re.compile(".*dynasty-scans.*", re.IGNORECASE)
+        exgetcore = re.compile(".*e[x|-]hentai.*", re.IGNORECASE)
+        http = re.compile('http.*', re.IGNORECASE)
+        
+        #╺┳━┓┏━┓┏━╸┏━╸━┳━
+        # ┃ ┃┗━┓┃╺┓┣╸  ┃ 
+        #╺┻━┛┗━┛┗━┛┗━╸ ╹
+
+        if dsgetcore.match(tmpurl):
+            if not http.match(tmpurl):
+                tmpurl = "http://" + tmpurl
+            
+            m_gallery = BeautifulSoup(GetGallery(tmpurl).text)
+            if IsOneShot(m_gallery):
+                self.liststore.append([tmpurl, tmpdir, 0])
+                self.entryurl.set_text("")
+                self.entrydir.set_text("")
+            else:
+                
+                
+                gal_urls = GetGalleryURLs(m_gallery)
+                for x in gal_urls:
+                    #DownloadGallery(BeautifulSoup(GetGallery(x).text), self)
+                    self.liststore.append([x, tmpdir, 0])
+                    
+        #┏━╸╻ ╻┏━╸┏━╸━┳━
+        #┣╸ ┏╋┛┃╺┓┣╸  ┃ 
+        #┗━╸╹ ╹┗━┛┗━╸ ╹ 
+
+        
+        elif exgetcore.match(tmpurl):
+            if not http.match(tmpurl):
+                tmpurl = "http://" + tmpurl
+                
+            m_gallery = BeautifulSoup(GetGallery(tmpurl).text)
+            
+        else:
+            dialog = Gtk.MessageDialog(self, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.CANCEL, "URL Error")
+            dialog.format_secondary_text("Please enter a valid URL (http://dynasty-scans.com/*)")
+            dialog.run()
+
+            dialog.destroy()
+            
+            
+
+    def text_edited(self, widget, path, text):
+        self.liststore[path][1] = text
+
+
+    def on_go_clicked(self, widget):
+        #START THE DAMN THING
+        global pause
+        if pause:
+            pause = False
+        else:
+            thread = threading.Thread(target=self.begin)
+            thread.start()
+
+
+    def on_pause_clicked(self, widget):
+        global pause
+        pause = True
+
+
+    def on_folder_clicked(self, widget):
+        dialog = Gtk.FileChooserDialog("Please choose a folder", self, Gtk.FileChooserAction.SELECT_FOLDER,(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Select", Gtk.ResponseType.OK))
+        dialog.set_default_size(800, 400)
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            print("Select clicked")
+            print("Folder selected: " + dialog.get_filename())
+            self.entrydir.set_text(dialog.get_filename())
+        elif response == Gtk.ResponseType.CANCEL:
+            print("Cancel clicked")
+
+        dialog.destroy()
+
+
+    def on_menuitem_clicked(self, widget, item):
+        if item == 'Preferences':
+            dialog = SettingsDialog(self)
+        elif item == 'About':
+            dialog = AboutDialog(self)
+        response = dialog.run()
+
+        if response == Gtk.ResponseType.OK:
+            print("The OK button was clicked")
+        elif response == Gtk.ResponseType.CANCEL:
+            print("The Cancel button was clicked")
+        dialog.destroy()
+
+
+
+    def begin(self):
+
+
+        def GetImageURLs(gallery):
+            '''Returns image URLs'''
+            imgs = gallery.findAll('script', text=re.compile("pages"))
+            preurls = re.findall(r'"image":"(.*?)"', imgs[0].text)
+            imageurls = []
+
+            for preurl in preurls:
+                imageurls.append("http://dynasty-scans.com" + preurl)
+
+            return imageurls
+
+
+        def DownloadImage(img_url):
+            '''Downloads the image, also makes folders'''
+            image_url = img_url#Muh java
+            image_name = image_url.rsplit('/',1)[1]#gets the last bit of the URL for the name
+            image_name = unicodedata.normalize('NFKD', image_name).encode('ascii','ignore')
+            #for some reason it's unicode, so let's fix that
+            r = s.get(image_url, stream=True) #time to download
+            size = int(r.headers['content-length']) #gets the size of the file
+            f_directory = ovdirectory + directory
+
+            if not os.path.exists(f_directory):
+                os.makedirs(f_directory)
+
+            if r.status_code == 200:
+                with open(os.path.join(f_directory, image_name.decode("utf-8")), 'wb') as f:
+                    for chunk in r.iter_content(1024):
+                        f.write(chunk)
+            else:
+                raise BadStatus(r.status_code)
+
+
+        def DownloadGallery(t_gallery):
+            '''Starts downloading the images'''
+            global directory
+            global ovdirectory
+            urls = GetImageURLs(t_gallery)
+            pretitle = t_gallery.find('title').text
+            title = pretitle[17:]
+            directory = title.replace(ovdirectory, "")
+
+
+
+            for index, x in enumerate(urls):
+                DownloadImage(x)
+                global row
+                
+                while pause:
+                    time.sleep(1)
+                
+                self.liststore[row][2] = int(((index + 1) / len(urls)) * 100)
+                print(index)
+                print(len(urls))
+                while Gtk.events_pending():
+                    Gtk.main_iteration()
+
+                print(self.liststore[row][2])
+                time.sleep(0.500)   #just in case
+
+
+        global row
+        row = 0
+        for i in self.liststore:
+            failed = []
+            global directory
+            global ovdirectory
+            ovdirectory = i[:][1]
+            directory = ''
+            gallery_url = i[:][0]
+            
+            m_gallery = BeautifulSoup(GetGallery(gallery_url).text)
+
+            DownloadGallery(m_gallery)
+                
+
+            row += 1
+
+
+
+class SettingsDialog(Gtk.Dialog):
+
+    def __init__(self, parent):
+        Gtk.Dialog.__init__(self, "Settings", parent, 0, (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK))
+        self.set_default_size(300, 200)
+        self.set_modal(self)
+        label = Gtk.Label("Settings go here.")
+
+        box = self.get_content_area()
+        box.add(label)
+
+        self.show_all()
+
+class AboutDialog(Gtk.Dialog):
+
+    def __init__(self, parent):
+        Gtk.Dialog.__init__(self, "About", parent, 0, (Gtk.STOCK_OK, Gtk.ResponseType.OK))
+        self.set_default_size(300, 200)
+        self.set_modal(self)
+        label = Gtk.Label("Created by swag. See: https://github.com/swag4swag")
+
+        box = self.get_content_area()
+        box.add(label)
+
+        self.show_all()
+
+global pause
+pause = False
+GLib.threads_init()
+
+s = requests.Session()
+win = MyWindow()
+win.connect("delete-event", Gtk.main_quit)
+win.show_all()
+Gtk.main()
